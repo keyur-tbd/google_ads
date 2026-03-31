@@ -1,0 +1,48 @@
+name: Google Ads → Neon Daily Sync
+
+on:
+  schedule:
+    - cron: "0 11 * * *"   # Every day at 11:00 AM UTC
+  workflow_dispatch:        # Allow manual runs from the Actions tab
+
+jobs:
+  sync:
+    name: Sync PMax data to Neon
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            google-ads \
+            psycopg2-binary \
+            google-auth-oauthlib \
+            python-dotenv
+
+      - name: Run sync
+        env:
+          NEON_DSN:                      ${{ secrets.NEON_DSN }}
+          GOOGLE_ADS_DEVELOPER_TOKEN:    ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_TOKEN_JSON:         ${{ secrets.GOOGLE_ADS_TOKEN_JSON }}
+          GOOGLE_ADS_CUSTOMER_IDS:       ${{ secrets.GOOGLE_ADS_CUSTOMER_IDS }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID:  ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+          LOOKBACK_DAYS:                 "3"
+        run: python google_ads_to_neon.py
+
+      - name: Upload sync log
+        if: always()   # Upload log even if the sync step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-log-${{ github.run_id }}
+          path: sync.log
+          retention-days: 30
