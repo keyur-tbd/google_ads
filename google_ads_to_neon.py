@@ -38,7 +38,7 @@ except ImportError:
 # --- Config ------------------------------------------------------------------
 
 NEON_DSN      = os.environ["NEON_DSN"]
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "3"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
 TOKEN_FILE    = os.getenv("GOOGLE_ADS_TOKEN_FILE", "token.json")
 
 CUSTOMER_IDS: list[str] = [
