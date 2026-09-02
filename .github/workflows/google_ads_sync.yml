@@ -1,15 +1,24 @@
-name: Google Ads → Neon Daily Sync
+name: Google Ads → Supabase Daily Sync
 
 on:
   schedule:
-    - cron: "20 11 * * *"   # Every day at 11:00 AM UTC
-  workflow_dispatch:        # Allow manual runs from the Actions tab
+    - cron: "20 11 * * *"   # Every day at 11:20 UTC (16:50 IST)
+  workflow_dispatch:        # Manual run; fill start/end to backfill a range
+    inputs:
+      start_date:
+        description: "Backfill start (YYYY-MM-DD). Leave empty for the normal lookback run."
+        required: false
+        default: ""
+      end_date:
+        description: "Backfill end (YYYY-MM-DD). Defaults to yesterday."
+        required: false
+        default: ""
 
 jobs:
   sync:
-    name: Sync PMax data to Neon
+    name: Sync Google Ads data to Supabase
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -19,22 +28,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run sync
         env:
-          NEON_DSN:                      ${{ secrets.NEON_DSN }}
+          SUPABASE_DB_URL:               ${{ secrets.SUPABASE_DB_URL }}
           GOOGLE_ADS_DEVELOPER_TOKEN:    ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
           GOOGLE_ADS_TOKEN_JSON:         ${{ secrets.GOOGLE_ADS_TOKEN_JSON }}
           GOOGLE_ADS_CUSTOMER_IDS:       ${{ secrets.GOOGLE_ADS_CUSTOMER_IDS }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID:  ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
-          LOOKBACK_DAYS:                 "3"
-        run: python google_ads_to_neon.py
+          LOOKBACK_DAYS:                 "7"
+          START_DATE:                    ${{ github.event.inputs.start_date }}
+          END_DATE:                      ${{ github.event.inputs.end_date }}
+        run: python google_ads_sync.py
 
       - name: Upload sync log
-        if: always()   # Upload log even if the sync step failed
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sync-log-${{ github.run_id }}
