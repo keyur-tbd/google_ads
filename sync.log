@@ -1,0 +1,15 @@
+2026-09-02 11:22:13,499 [INFO]   Upserted 1 campaign rows
+2026-09-02 11:22:13,662 [INFO]   Upserted 1 campaign rows
+2026-09-02 11:22:13,825 [INFO]   Upserted 1 asset group rows
+2026-09-02 11:22:13,989 [INFO]   Upserted 1 search term rows
+2026-09-02 11:22:13,989 [INFO]   Deduped 2 -> 1 product performance rows
+2026-09-02 11:22:14,154 [INFO]   Upserted 1 product performance rows
+2026-09-02 11:23:24,814 [INFO] -- Account: 111  2026-01-01 -> 2026-01-02
+2026-09-02 11:23:24,814 [INFO]   Fetching campaigns...
+2026-09-02 11:23:24,814 [ERROR]   FAILED 111 campaigns 2026-01-01..2026-01-02: [campaigns] PERMISSION_DENIED: no access
+2026-09-02 11:23:24,815 [INFO]   Fetching asset_groups...
+2026-09-02 11:23:24,815 [ERROR]   FAILED 111 asset_groups 2026-01-01..2026-01-02: [asset_groups] PERMISSION_DENIED: no access
+2026-09-02 11:23:24,815 [INFO]   Fetching search_terms...
+2026-09-02 11:23:24,815 [ERROR]   FAILED 111 search_terms 2026-01-01..2026-01-02: [search_terms] PERMISSION_DENIED: no access
+2026-09-02 11:23:24,815 [INFO]   Fetching product_performance...
+2026-09-02 11:23:24,815 [ERROR]   FAILED 111 product_performance 2026-01-01..2026-01-02: [product_performance] PERMISSION_DENIED: no access
