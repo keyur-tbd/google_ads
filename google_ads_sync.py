@@ -39,6 +39,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
+from etl_alerts import guard
 
 try:
     from dotenv import load_dotenv
@@ -527,6 +528,10 @@ def ensure_schema(conn):
 def main():
     if not CUSTOMER_IDS:
         raise SystemExit("GOOGLE_ADS_CUSTOMER_IDS is not set")
+
+    # Shared disk guard: refuse to write if this pipeline is over its budget,
+    # or the volume is full. Emails on warn/stop. See etl_alerts.py.
+    guard("marketplace")
 
     start, end = get_date_range()
     log.info("=" * 60)

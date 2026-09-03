@@ -35,6 +35,10 @@ jobs:
         env:
           NEON_DSN:        ${{ secrets.NEON_DSN }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          GMAIL_SENDER: ${{ secrets.GMAIL_SENDER }}
           TABLES:          ${{ github.event.inputs.tables }}
           OVERWRITE:       ${{ github.event.inputs.overwrite == 'true' && '1' || '0' }}
           SYNC_MODULE:     google_ads_sync
