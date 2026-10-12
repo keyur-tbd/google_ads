@@ -2,7 +2,8 @@
 Google Ads -> Supabase (PostgreSQL) Incremental Sync
 ====================================================
 Fetches daily performance for every account in GOOGLE_ADS_CUSTOMER_IDS:
-  - gads_campaigns          : campaign-level metrics (all channel types)
+  - gads_campaigns          : campaign-level metrics (all channel types), incl.
+                              video views / view rate / quartiles (2026-10-12)
   - gads_asset_groups       : Performance Max asset groups
   - gads_search_terms       : search terms (Search / Shopping campaigns)
   - gads_product_performance: shopping / product-level performance
@@ -147,6 +148,17 @@ CREATE TABLE IF NOT EXISTS gads_campaigns (
 );
 ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS channel_type     TEXT;
 ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS channel_sub_type TEXT;
+-- Video (added 2026-10-12). video_views / video_view_rate are Google's TrueView views and
+-- view rate (a view = 30 s or the whole ad, or an interaction); Google never counts them on
+-- non-skippable in-stream and bumper ads, so those campaigns carry 0 / 0 by design. The
+-- quartiles are the share of impressions that played to 25 / 50 / 75 / 100% and are reported
+-- on every YouTube format. All rates are fractions (0.25 = 25%). NULL = not reported.
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_views      BIGINT;
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_view_rate  DOUBLE PRECISION;
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_p25_rate   DOUBLE PRECISION;
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_p50_rate   DOUBLE PRECISION;
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_p75_rate   DOUBLE PRECISION;
+ALTER TABLE gads_campaigns ADD COLUMN IF NOT EXISTS video_p100_rate  DOUBLE PRECISION;
 
 -- PMax asset groups (equivalent of ad groups)
 CREATE TABLE IF NOT EXISTS gads_asset_groups (
@@ -219,6 +231,22 @@ def _search(client, customer_id, query, report):
         raise ReportError(f"[{report}] {details}") from ex
 
 
+def _opt(message, field):
+    """An optional proto field, or None when the API left it unset (proto-plus reports
+    presence with `in`; an unset optional otherwise reads as 0)."""
+    return getattr(message, field) if field in message else None
+
+
+# The video metrics need Google Ads API v22+ (video_trueview_* replaced video_views /
+# video_view_rate there), i.e. google-ads >= 30.0.0; the client uses the library's default
+# version.
+VIDEO_METRICS = (
+    "video_trueview_views", "video_trueview_view_rate",
+    "video_quartile_p25_rate", "video_quartile_p50_rate",
+    "video_quartile_p75_rate", "video_quartile_p100_rate",
+)
+
+
 def fetch_campaigns(client, customer_id, start_date, end_date):
     query = f"""
         SELECT
@@ -232,7 +260,8 @@ def fetch_campaigns(client, customer_id, start_date, end_date):
             metrics.impressions,
             metrics.cost_micros,
             metrics.conversions,
-            metrics.conversions_value
+            metrics.conversions_value,
+            {", ".join("metrics." + m for m in VIDEO_METRICS)}
         FROM campaign
         WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
     """
@@ -251,6 +280,7 @@ def fetch_campaigns(client, customer_id, start_date, end_date):
             row.metrics.cost_micros,
             row.metrics.conversions,
             row.metrics.conversions_value,
+            *(_opt(row.metrics, m) for m in VIDEO_METRICS),
         ))
     log.info(f"  Fetched {len(rows)} campaign rows")
     return rows
@@ -372,7 +402,9 @@ def upsert_campaigns(cur, rows):
         INSERT INTO gads_campaigns
             (date, customer_id, campaign_id, campaign_name, status,
              channel_type, channel_sub_type,
-             clicks, impressions, cost_micros, conversions, conversion_value)
+             clicks, impressions, cost_micros, conversions, conversion_value,
+             video_views, video_view_rate,
+             video_p25_rate, video_p50_rate, video_p75_rate, video_p100_rate)
         VALUES %s
         ON CONFLICT (date, customer_id, campaign_id) DO UPDATE SET
             campaign_name    = EXCLUDED.campaign_name,
@@ -384,6 +416,12 @@ def upsert_campaigns(cur, rows):
             cost_micros      = EXCLUDED.cost_micros,
             conversions      = EXCLUDED.conversions,
             conversion_value = EXCLUDED.conversion_value,
+            video_views      = EXCLUDED.video_views,
+            video_view_rate  = EXCLUDED.video_view_rate,
+            video_p25_rate   = EXCLUDED.video_p25_rate,
+            video_p50_rate   = EXCLUDED.video_p50_rate,
+            video_p75_rate   = EXCLUDED.video_p75_rate,
+            video_p100_rate  = EXCLUDED.video_p100_rate,
             synced_at        = NOW()
     """, rows, page_size=1000)
     log.info(f"  Upserted {len(rows)} campaign rows")

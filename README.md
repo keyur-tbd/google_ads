@@ -13,6 +13,15 @@ Daily GitHub Actions job that pulls Google Ads performance data and upserts it i
 
 Every table has `cost_micros` plus a generated `cost` column in account currency, and `synced_at`.
 
+`gads_campaigns` also carries Google's video metrics (since 2026-10-12, history
+backfilled from the API): `video_views` and `video_view_rate` are TrueView views
+and view rate (a view = 30 seconds or the whole ad, or an interaction with it);
+`video_p25_rate` .. `video_p100_rate` are the share of impressions that played to
+25 / 50 / 75 / 100%. Rates are fractions. **Non-skippable in-stream and bumper ads
+never count views** (Google reports a dash), so the brand account's non-skippable
+campaigns carry 0 views / 0 rate by design; the quartiles are reported on every
+format and are the watch signal there. NULL = the API did not report the field.
+
 ## Secrets
 
 | Secret | Value |
@@ -114,10 +123,12 @@ their natural key, so a reader never sees a half-loaded table.
 `public` with nobody in the loop, and stays invisible to Birbal until the mirror
 above is rebuilt.
 
-Exposed today: `gads_product_performance` only.
-**`gads_campaigns`, `gads_asset_groups` and `gads_search_terms` are NOT exposed** -
-Birbal cannot answer on them at all until the two calls above are run for those
-three tables and a `warehouse_meta` row is written for each.
+Exposed today: `gads_campaigns` (with a `warehouse_meta` row, and read hourly by
+Birbal's Performance Marketing facts) and `gads_product_performance`.
+**`gads_asset_groups` and `gads_search_terms` are NOT exposed** - Birbal cannot
+answer on them at all until the two calls above are run for those tables and a
+`warehouse_meta` row is written for each. The video columns were mirrored by
+Birbal migration 167 (2026-10-12).
 
 Full contract, and the checks to run after a schema change:
 https://github.com/keyur-tbd/bc-supabase-sync#who-reads-this-database-birbal
