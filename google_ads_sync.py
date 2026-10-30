@@ -7,6 +7,12 @@ Fetches daily performance for every account in GOOGLE_ADS_CUSTOMER_IDS:
   - gads_asset_groups       : Performance Max asset groups
   - gads_search_terms       : search terms (Search / Shopping campaigns)
   - gads_product_performance: shopping / product-level performance
+  - gads_ads                : ad-level metrics (2026-10-30), same measures as
+                              gads_campaigns; Performance Max has no ads, so its
+                              spend stays campaign-level only
+  - gads_ad_creatives       : one row per ad, a snapshot taken every run: ad /
+                              ad group / campaign status now, the YouTube video
+                              or image behind the ad and a small JPEG thumbnail
 
 Date range
   Default   : yesterday minus LOOKBACK_DAYS  ->  yesterday
@@ -31,12 +37,16 @@ successful ones are still committed.
 """
 
 import os
+import io
 import sys
 import json
+import hashlib
 import logging
 from datetime import timedelta, date
 
 import psycopg2
+import requests
+from PIL import Image
 from psycopg2.extras import execute_values
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
@@ -214,6 +224,65 @@ CREATE TABLE IF NOT EXISTS gads_product_performance (
     synced_at               TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (date, customer_id, campaign_id, product_id)
 );
+
+-- Ad level (2026-10-30). Same measures and video semantics as gads_campaigns.
+CREATE TABLE IF NOT EXISTS gads_ads (
+    date                DATE NOT NULL,
+    customer_id         TEXT NOT NULL,
+    campaign_id         BIGINT NOT NULL,
+    ad_group_id         BIGINT NOT NULL,
+    ad_id               BIGINT NOT NULL,
+    ad_name             TEXT,
+    ad_type             TEXT,
+    ad_status           TEXT,
+    clicks              BIGINT,
+    impressions         BIGINT,
+    cost_micros         BIGINT,
+    cost                NUMERIC(18,6) GENERATED ALWAYS AS (cost_micros / 1000000.0) STORED,
+    conversions         DOUBLE PRECISION,
+    conversion_value    DOUBLE PRECISION,
+    video_views         BIGINT,
+    video_view_rate     DOUBLE PRECISION,
+    video_p25_rate      DOUBLE PRECISION,
+    video_p50_rate      DOUBLE PRECISION,
+    video_p75_rate      DOUBLE PRECISION,
+    video_p100_rate     DOUBLE PRECISION,
+    synced_at           TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (date, customer_id, ad_group_id, ad_id)
+);
+
+-- One row per ad, rewritten every run: status now, and what the ad shows. thumb is a
+-- JPEG (longest side THUMB_PX): YouTube's own 320x180 still for video ads, else the
+-- first image, resized. thumb_source is the URL it came from, so it is re-fetched
+-- only when the ad's video or image changes.
+CREATE TABLE IF NOT EXISTS gads_ad_creatives (
+    customer_id         TEXT NOT NULL,
+    ad_group_id         BIGINT NOT NULL,
+    ad_id               BIGINT NOT NULL,
+    campaign_id         BIGINT,
+    ad_group_name       TEXT,
+    ad_name             TEXT,
+    ad_type             TEXT,
+    ad_status           TEXT,
+    ad_group_status     TEXT,
+    campaign_status     TEXT,
+    final_url           TEXT,
+    youtube_video_id    TEXT,
+    youtube_title       TEXT,
+    image_url           TEXT,
+    thumb               BYTEA,
+    thumb_sha           TEXT,
+    thumb_w             INTEGER,
+    thumb_h             INTEGER,
+    thumb_source        TEXT,
+    thumb_error         TEXT,
+    synced_at           TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (customer_id, ad_group_id, ad_id)
+);
+-- Supabase grants anon/authenticated write on new public tables; RLS with no policy
+-- shuts that door (the sync connects as the owner and is not affected).
+ALTER TABLE gads_ads          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gads_ad_creatives ENABLE ROW LEVEL SECURITY;
 """
 
 # --- Fetch helpers -----------------------------------------------------------
@@ -393,6 +462,46 @@ def fetch_product_performance(client, customer_id, start_date, end_date):
     log.info(f"  Fetched {len(rows)} product performance rows")
     return rows
 
+def fetch_ads(client, customer_id, start_date, end_date):
+    query = f"""
+        SELECT
+            segments.date,
+            campaign.id,
+            ad_group.id,
+            ad_group_ad.ad.id,
+            ad_group_ad.ad.name,
+            ad_group_ad.ad.type,
+            ad_group_ad.status,
+            metrics.clicks,
+            metrics.impressions,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.conversions_value,
+            {", ".join("metrics." + m for m in VIDEO_METRICS)}
+        FROM ad_group_ad
+        WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'
+    """
+    rows = []
+    for row in _search(client, customer_id, query, "ads"):
+        rows.append((
+            row.segments.date,
+            customer_id,
+            row.campaign.id,
+            row.ad_group.id,
+            row.ad_group_ad.ad.id,
+            row.ad_group_ad.ad.name or None,
+            row.ad_group_ad.ad.type_.name,
+            row.ad_group_ad.status.name,
+            row.metrics.clicks,
+            row.metrics.impressions,
+            row.metrics.cost_micros,
+            row.metrics.conversions,
+            row.metrics.conversions_value,
+            *(_opt(row.metrics, m) for m in VIDEO_METRICS),
+        ))
+    log.info(f"  Fetched {len(rows)} ad rows")
+    return rows
+
 # --- Upsert Functions --------------------------------------------------------
 
 def upsert_campaigns(cur, rows):
@@ -512,6 +621,157 @@ def upsert_product_performance(cur, rows):
     """, deduped, page_size=1000)
     log.info(f"  Upserted {len(deduped)} product performance rows")
 
+def upsert_ads(cur, rows):
+    if not rows:
+        return
+    execute_values(cur, """
+        INSERT INTO gads_ads
+            (date, customer_id, campaign_id, ad_group_id, ad_id, ad_name, ad_type, ad_status,
+             clicks, impressions, cost_micros, conversions, conversion_value,
+             video_views, video_view_rate,
+             video_p25_rate, video_p50_rate, video_p75_rate, video_p100_rate)
+        VALUES %s
+        ON CONFLICT (date, customer_id, ad_group_id, ad_id) DO UPDATE SET
+            campaign_id      = EXCLUDED.campaign_id,
+            ad_name          = EXCLUDED.ad_name,
+            ad_type          = EXCLUDED.ad_type,
+            ad_status        = EXCLUDED.ad_status,
+            clicks           = EXCLUDED.clicks,
+            impressions      = EXCLUDED.impressions,
+            cost_micros      = EXCLUDED.cost_micros,
+            conversions      = EXCLUDED.conversions,
+            conversion_value = EXCLUDED.conversion_value,
+            video_views      = EXCLUDED.video_views,
+            video_view_rate  = EXCLUDED.video_view_rate,
+            video_p25_rate   = EXCLUDED.video_p25_rate,
+            video_p50_rate   = EXCLUDED.video_p50_rate,
+            video_p75_rate   = EXCLUDED.video_p75_rate,
+            video_p100_rate  = EXCLUDED.video_p100_rate,
+            synced_at        = NOW()
+    """, rows, page_size=1000)
+    log.info(f"  Upserted {len(rows)} ad rows")
+
+# --- Creatives snapshot ------------------------------------------------------
+
+THUMB_PX = int(os.getenv("THUMB_PX", "320"))
+
+# Where an ad keeps its video or images, by ad type. Each is a repeated field of
+# AdVideoAsset / AdImageAsset (or one, for VIDEO_AD), holding an asset resource name.
+CREATIVE_FIELDS = (
+    "ad_group_ad.ad.video_ad.video.asset",
+    "ad_group_ad.ad.video_responsive_ad.videos",
+    "ad_group_ad.ad.demand_gen_video_responsive_ad.videos",
+    "ad_group_ad.ad.responsive_display_ad.marketing_images",
+    "ad_group_ad.ad.demand_gen_multi_asset_ad.marketing_images",
+    "ad_group_ad.ad.image_ad.image_url",
+)
+
+
+def _assets(client, customer_id):
+    query = """
+        SELECT asset.resource_name, asset.type,
+               asset.youtube_video_asset.youtube_video_id,
+               asset.youtube_video_asset.youtube_video_title,
+               asset.image_asset.full_size.url
+        FROM asset
+        WHERE asset.type IN ('YOUTUBE_VIDEO', 'IMAGE')
+    """
+    out = {}
+    for row in _search(client, customer_id, query, "assets"):
+        a = row.asset
+        if a.type_.name == "YOUTUBE_VIDEO":
+            out[a.resource_name] = ("video", a.youtube_video_asset.youtube_video_id,
+                                    a.youtube_video_asset.youtube_video_title or None)
+        else:
+            out[a.resource_name] = ("image", a.image_asset.full_size.url, None)
+    return out
+
+
+def _make_thumb(url):
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    img.thumbnail((THUMB_PX, THUMB_PX))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=82, optimize=True)
+    data = out.getvalue()
+    return data, hashlib.sha1(data).hexdigest(), img.width, img.height
+
+
+def sync_creatives(client, conn, customer_id):
+    """Status + creative of every ad in the account, as they are now."""
+    assets = _assets(client, customer_id)
+    query = f"""
+        SELECT campaign.id, campaign.status, ad_group.id, ad_group.name, ad_group.status,
+               ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type, ad_group_ad.status,
+               ad_group_ad.ad.final_urls, {", ".join(CREATIVE_FIELDS)}
+        FROM ad_group_ad
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT ad_group_id, ad_id, thumb_source FROM gads_ad_creatives "
+                    "WHERE customer_id = %s AND thumb IS NOT NULL", (customer_id,))
+        have = {(r[0], r[1]): r[2] for r in cur.fetchall()}
+
+    rows, fetched, failed = [], 0, 0
+    for row in _search(client, customer_id, query, "ad_creatives"):
+        ad = row.ad_group_ad.ad
+        names = []
+        if ad.video_ad.video.asset:
+            names.append(ad.video_ad.video.asset)
+        for group in (ad.video_responsive_ad.videos, ad.demand_gen_video_responsive_ad.videos,
+                      ad.responsive_display_ad.marketing_images, ad.demand_gen_multi_asset_ad.marketing_images):
+            names += [x.asset for x in group]
+        found = [assets[n] for n in names if n in assets]
+        video = next((f for f in found if f[0] == "video"), None)
+        image = next((f for f in found if f[0] == "image"), None)
+        image_url = image[1] if image else (ad.image_ad.image_url or None)
+        source = (f"https://i.ytimg.com/vi/{video[1]}/mqdefault.jpg" if video else image_url)
+
+        key = (row.ad_group.id, ad.id)
+        thumb = sha = w = h = err = None
+        refetch = bool(source) and have.get(key) != source
+        if refetch:
+            try:
+                thumb, sha, w, h = _make_thumb(source)
+                fetched += 1
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"[:300]
+                failed += 1
+        rows.append((
+            customer_id, row.ad_group.id, ad.id, row.campaign.id, row.ad_group.name or None,
+            ad.name or None, ad.type_.name, row.ad_group_ad.status.name, row.ad_group.status.name,
+            row.campaign.status.name, (list(ad.final_urls) or [None])[0],
+            video[1] if video else None, video[2] if video else None, image_url,
+            thumb, sha, w, h, source if thumb else None, err,
+        ))
+
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO gads_ad_creatives
+                    (customer_id, ad_group_id, ad_id, campaign_id, ad_group_name, ad_name, ad_type,
+                     ad_status, ad_group_status, campaign_status, final_url, youtube_video_id,
+                     youtube_title, image_url, thumb, thumb_sha, thumb_w, thumb_h, thumb_source, thumb_error)
+                VALUES %s
+                ON CONFLICT (customer_id, ad_group_id, ad_id) DO UPDATE SET
+                    campaign_id = EXCLUDED.campaign_id, ad_group_name = EXCLUDED.ad_group_name,
+                    ad_name = EXCLUDED.ad_name, ad_type = EXCLUDED.ad_type,
+                    ad_status = EXCLUDED.ad_status, ad_group_status = EXCLUDED.ad_group_status,
+                    campaign_status = EXCLUDED.campaign_status, final_url = EXCLUDED.final_url,
+                    youtube_video_id = EXCLUDED.youtube_video_id, youtube_title = EXCLUDED.youtube_title,
+                    image_url = EXCLUDED.image_url,
+                    -- keep the stored picture unless a new one was fetched
+                    thumb        = COALESCE(EXCLUDED.thumb, gads_ad_creatives.thumb),
+                    thumb_sha    = COALESCE(EXCLUDED.thumb_sha, gads_ad_creatives.thumb_sha),
+                    thumb_w      = COALESCE(EXCLUDED.thumb_w, gads_ad_creatives.thumb_w),
+                    thumb_h      = COALESCE(EXCLUDED.thumb_h, gads_ad_creatives.thumb_h),
+                    thumb_source = COALESCE(EXCLUDED.thumb_source, gads_ad_creatives.thumb_source),
+                    thumb_error  = EXCLUDED.thumb_error,
+                    synced_at    = NOW()
+            """, rows, page_size=500)
+    conn.commit()
+    log.info(f"  Ad creatives: {len(rows)} ads, {fetched} new thumbnails, {failed} failed")
+
 # --- Sync One Account --------------------------------------------------------
 
 REPORTS = [
@@ -519,6 +779,7 @@ REPORTS = [
     ("asset_groups",        fetch_asset_groups,        upsert_asset_groups),
     ("search_terms",        fetch_search_terms,        upsert_search_terms),
     ("product_performance", fetch_product_performance, upsert_product_performance),
+    ("ads",                 fetch_ads,                 upsert_ads),
 ]
 
 
@@ -585,6 +846,16 @@ def main():
     for chunk_start, chunk_end in date_chunks(start, end, CHUNK_DAYS):
         for customer_id in CUSTOMER_IDS:
             errors += sync_account(client, conn, customer_id, chunk_start, chunk_end)
+
+    # status + creatives are a snapshot of now, so once per run, not per window
+    for customer_id in CUSTOMER_IDS:
+        try:
+            sync_creatives(client, conn, customer_id)
+        except Exception as e:
+            conn.rollback()
+            msg = f"{customer_id} ad_creatives: {e}"
+            log.error(f"  FAILED {msg}")
+            errors.append(msg)
 
     conn.close()
 
