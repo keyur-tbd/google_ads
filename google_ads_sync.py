@@ -267,6 +267,8 @@ CREATE TABLE IF NOT EXISTS gads_ad_creatives (
     ad_group_status     TEXT,
     campaign_status     TEXT,
     final_url           TEXT,
+    ad_primary_status       TEXT,   -- Google's one-word verdict: ELIGIBLE, PAUSED, ENDED, LIMITED, ...
+    campaign_primary_status TEXT,
     youtube_video_id    TEXT,
     youtube_title       TEXT,
     image_url           TEXT,
@@ -281,6 +283,8 @@ CREATE TABLE IF NOT EXISTS gads_ad_creatives (
 );
 -- Supabase grants anon/authenticated write on new public tables; RLS with no policy
 -- shuts that door (the sync connects as the owner and is not affected).
+ALTER TABLE gads_ad_creatives ADD COLUMN IF NOT EXISTS ad_primary_status       TEXT;
+ALTER TABLE gads_ad_creatives ADD COLUMN IF NOT EXISTS campaign_primary_status TEXT;
 ALTER TABLE gads_ads          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gads_ad_creatives ENABLE ROW LEVEL SECURITY;
 """
@@ -702,8 +706,9 @@ def sync_creatives(client, conn, customer_id):
     """Status + creative of every ad in the account, as they are now."""
     assets = _assets(client, customer_id)
     query = f"""
-        SELECT campaign.id, campaign.status, ad_group.id, ad_group.name, ad_group.status,
-               ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type, ad_group_ad.status,
+        SELECT campaign.id, campaign.status, campaign.primary_status, ad_group.id, ad_group.name,
+               ad_group.status, ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type,
+               ad_group_ad.status, ad_group_ad.primary_status,
                ad_group_ad.ad.final_urls, {", ".join(CREATIVE_FIELDS)}
         FROM ad_group_ad
     """
@@ -743,6 +748,7 @@ def sync_creatives(client, conn, customer_id):
             row.campaign.status.name, (list(ad.final_urls) or [None])[0],
             video[1] if video else None, video[2] if video else None, image_url,
             thumb, sha, w, h, source if thumb else None, err,
+            row.ad_group_ad.primary_status.name, row.campaign.primary_status.name,
         ))
 
     if rows:
@@ -751,7 +757,8 @@ def sync_creatives(client, conn, customer_id):
                 INSERT INTO gads_ad_creatives
                     (customer_id, ad_group_id, ad_id, campaign_id, ad_group_name, ad_name, ad_type,
                      ad_status, ad_group_status, campaign_status, final_url, youtube_video_id,
-                     youtube_title, image_url, thumb, thumb_sha, thumb_w, thumb_h, thumb_source, thumb_error)
+                     youtube_title, image_url, thumb, thumb_sha, thumb_w, thumb_h, thumb_source, thumb_error,
+                     ad_primary_status, campaign_primary_status)
                 VALUES %s
                 ON CONFLICT (customer_id, ad_group_id, ad_id) DO UPDATE SET
                     campaign_id = EXCLUDED.campaign_id, ad_group_name = EXCLUDED.ad_group_name,
@@ -767,6 +774,8 @@ def sync_creatives(client, conn, customer_id):
                     thumb_h      = COALESCE(EXCLUDED.thumb_h, gads_ad_creatives.thumb_h),
                     thumb_source = COALESCE(EXCLUDED.thumb_source, gads_ad_creatives.thumb_source),
                     thumb_error  = EXCLUDED.thumb_error,
+                    ad_primary_status       = EXCLUDED.ad_primary_status,
+                    campaign_primary_status = EXCLUDED.campaign_primary_status,
                     synced_at    = NOW()
             """, rows, page_size=500)
     conn.commit()
