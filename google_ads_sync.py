@@ -51,6 +51,7 @@ from psycopg2.extras import execute_values
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 from etl_alerts import guard
+from ddl_guard import ensure_ddl
 
 try:
     from dotenv import load_dotenv
@@ -828,8 +829,10 @@ def connect_db():
 
 
 def ensure_schema(conn):
+    # ADD COLUMN IF NOT EXISTS / ENABLE RLS lock the table even when they change nothing; queued behind a
+    # reader they ran into the 300 s statement_timeout (10-13 Nov 2026). ensure_ddl skips what is in place.
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_SQL)
+        ensure_ddl(cur, SCHEMA_SQL)
     conn.commit()
 
 
